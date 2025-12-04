@@ -1,16 +1,21 @@
 import mqtt, { MqttClient } from "mqtt";
-import type { MQTTMessage, MQTTCommand } from "../types";
+import type { MQTTMessage, MQTTCommand, ScheduleAction, MeasurementMessage } from "../types";
 
 class MQTTService {
   private client: MqttClient | null = null;
   private isConnected: boolean = false;
   private topic: string;
   private brokerUrl: string;
+  private measureTopic: string;
+  private measurementListeners: Array<(m: MeasurementMessage) => void> = [];
+  private lastMeasurement?: MeasurementMessage;
 
   constructor() {
     this.topic = import.meta.env.VITE_MQTT_TOPIC || "device/control";
     this.brokerUrl =
       import.meta.env.VITE_MQTT_BROKER_URL || "ws://localhost:8083/mqtt";
+    this.measureTopic =
+      import.meta.env.VITE_MQTT_MEASURE_TOPIC || "iot/energy/measurements";
   }
 
   /**
@@ -32,6 +37,14 @@ class MQTTService {
         this.client.on("connect", () => {
           this.isConnected = true;
           console.log("Conectado a MQTT broker");
+          // Suscribirse a topic de mediciones para estado del relé y métricas
+          this.client?.subscribe(this.measureTopic, (err) => {
+            if (err) {
+              console.error("Error al suscribirse a medidas:", err);
+            } else {
+              console.log("Suscrito a", this.measureTopic);
+            }
+          });
           resolve();
         });
 
@@ -44,6 +57,41 @@ class MQTTService {
         this.client.on("close", () => {
           this.isConnected = false;
           console.log("Desconectado de MQTT broker");
+        });
+
+        this.client.on("message", (topic, payload) => {
+          if (topic === this.measureTopic) {
+            try {
+              const raw = payload.toString();
+              const parsed = JSON.parse(raw) as any;
+              const measurement: MeasurementMessage = {
+                voltage: Number(parsed.voltage ?? 0),
+                current: Number(parsed.current ?? 0),
+                power: Number(parsed.power ?? 0),
+                energy: Number(parsed.energy ?? 0),
+                relay: parsed.relay ?? false,
+                timer_active:
+                  typeof parsed.timer_active !== "undefined"
+                    ? !!parsed.timer_active
+                    : undefined,
+                threshold_cut_enabled:
+                  typeof parsed.threshold_cut_enabled !== "undefined"
+                    ? !!parsed.threshold_cut_enabled
+                    : undefined,
+                timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : undefined,
+              };
+              this.lastMeasurement = measurement;
+              this.measurementListeners.forEach((cb) => {
+                try {
+                  cb(measurement);
+                } catch (e) {
+                  console.error("Error en listener de measurement:", e);
+                }
+              });
+            } catch (e) {
+              console.error("Error parseando measurement MQTT:", e);
+            }
+          }
         });
       } catch (error) {
         reject(error);
@@ -59,6 +107,8 @@ class MQTTService {
       this.client.end();
       this.client = null;
       this.isConnected = false;
+      this.lastMeasurement = undefined;
+      this.measurementListeners = [];
     }
   }
 
@@ -114,20 +164,62 @@ class MQTTService {
 
   /**
    * Envía comando de timer
-   * @param minutes - Minutos para el timer
+   * @param seconds - Segundos para el timer
    */
-  async setTimer(minutes: number): Promise<MQTTMessage> {
-    return this.sendCommand("timer", { minutes });
+  async setTimer(seconds: number): Promise<MQTTMessage> {
+    return this.sendCommand("timer", { seconds });
   }
 
   /**
    * Envía comando de schedule
-   * @param scheduledTime - Fecha y hora programada
+   * @param scheduledTime - Fecha y hora programada (ISO base)
+   * @param action - "on" | "off"
    */
-  async setSchedule(scheduledTime: Date): Promise<MQTTMessage> {
+  async setSchedule(
+    scheduledTime: Date,
+    action: ScheduleAction
+  ): Promise<MQTTMessage> {
+    const now = Date.now();
+    const diffMs = scheduledTime.getTime() - now;
+    const delaySeconds = Math.max(1, Math.ceil(diffMs / 1000));
     return this.sendCommand("schedule", {
       scheduledTime: scheduledTime.toISOString(),
+      action,
+      delaySeconds,
     });
+  }
+
+  /**
+   * Habilita/Deshabilita el corte por threshold en el dispositivo
+   */
+  async setThresholdCutEnabled(enabled: boolean): Promise<MQTTMessage> {
+    return this.sendCommand("threshold_cut", { enabled });
+  }
+
+  /**
+   * Suscribe un listener a las mediciones del dispositivo (incluye estado del relé).
+   * Devuelve una función para desuscribirse.
+   */
+  onMeasurement(listener: (m: MeasurementMessage) => void): () => void {
+    this.measurementListeners.push(listener);
+    // Emitir la última medición si existe
+    if (this.lastMeasurement) {
+      try {
+        listener(this.lastMeasurement);
+      } catch (e) {
+        console.error("Error entregando última medición:", e);
+      }
+    }
+    return () => {
+      this.measurementListeners = this.measurementListeners.filter((l) => l !== listener);
+    };
+  }
+
+  /**
+   * Última medición conocida (si la hay)
+   */
+  getLastMeasurement(): MeasurementMessage | undefined {
+    return this.lastMeasurement;
   }
 }
 

@@ -17,6 +17,8 @@ import { es } from "date-fns/locale";
 import {
   getDailyConsumption,
   getMonthlyConsumption,
+  getMinuteConsumption,
+  getLatest,
   convertToSoles,
 } from "../services/api";
 import type {
@@ -24,6 +26,7 @@ import type {
   Unit,
   DailyConsumptionData,
   MonthlyConsumptionData,
+  MinuteConsumptionData,
 } from "../types";
 import "./ConsumptionView.css";
 
@@ -46,26 +49,57 @@ export default function ConsumptionView() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [dailyData, setDailyData] = useState<DailyConsumptionData[]>([]);
   const [monthlyData, setMonthlyData] = useState<MonthlyConsumptionData[]>([]);
+  const [minuteData, setMinuteData] = useState<MinuteConsumptionData[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [autoRefreshMs] = useState<number>(10_000); // 10 segundos
+  const [latest, setLatest] = useState<{
+    power?: number;
+    voltage?: number;
+    current?: number;
+    session?: number;
+    relay?: boolean;
+  }>({});
 
   useEffect(() => {
     loadData();
   }, [viewMode, selectedDate]);
 
-  const loadData = async (): Promise<void> => {
-    setLoading(true);
+  // Auto-refresh cada minuto
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadData(true);
+    }, autoRefreshMs);
+    return () => clearInterval(id);
+  }, [viewMode, selectedDate, autoRefreshMs]);
+
+  const loadData = async (isAuto: boolean = false): Promise<void> => {
+    if (!isAuto) setLoading(true);
     try {
+      // Última medición (resumen)
+      const last = await getLatest();
+      if (last) {
+        setLatest({
+          power: last.power,
+          voltage: last.voltage,
+          current: last.current,
+          session: last.session_energy_kwh ?? last.energy,
+          relay: last.relay_bool ?? !!last.relay,
+        });
+      }
       if (viewMode === "daily") {
         const data = await getDailyConsumption(DEVICE_ID, selectedDate);
         setDailyData(data);
-      } else {
+      } else if (viewMode === "monthly") {
         const data = await getMonthlyConsumption(DEVICE_ID, selectedDate);
         setMonthlyData(data);
+      } else if (viewMode === "minute") {
+        const data = await getMinuteConsumption(60);
+        setMinuteData(data);
       }
     } catch (error) {
       console.error("Error cargando datos:", error);
     } finally {
-      setLoading(false);
+      if (!isAuto) setLoading(false);
     }
   };
 
@@ -94,7 +128,7 @@ export default function ConsumptionView() {
           },
         ],
       };
-    } else {
+    } else if (viewMode === "monthly") {
       const labels = monthlyData.map((d) =>
         format(d.timestamp, "d MMM", { locale: es })
       );
@@ -120,6 +154,27 @@ export default function ConsumptionView() {
           },
         ],
       };
+    } else {
+      // minute
+      const labels = minuteData.map((d) => format(d.timestamp, "HH:mm"));
+      const consumption = minuteData.map((d) =>
+        unit === "kwh" ? d.consumption : convertToSoles(d.consumption)
+      );
+      return {
+        labels,
+        datasets: [
+          {
+            label: unit === "kwh" ? "Consumo (kWh por minuto)" : "Costo (Soles por minuto)",
+            data: consumption,
+            borderColor: "#00CC66",
+            backgroundColor: "rgba(0, 204, 102, 0.1)",
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+          },
+        ],
+      };
     }
   };
 
@@ -142,9 +197,11 @@ export default function ConsumptionView() {
     },
     scales: {
       x: {
+        border: {
+          display: false,
+        },
         grid: {
           color: "rgba(255, 255, 255, 0.1)",
-          drawBorder: false,
         },
         ticks: {
           color: "#999999",
@@ -154,9 +211,11 @@ export default function ConsumptionView() {
         },
       },
       y: {
+        border: {
+          display: false,
+        },
         grid: {
           color: "rgba(255, 255, 255, 0.1)",
-          drawBorder: false,
         },
         ticks: {
           color: "#999999",
@@ -173,12 +232,17 @@ export default function ConsumptionView() {
     if (viewMode === "daily") {
       const total = dailyData.reduce((sum, d) => sum + d.consumption, 0);
       return unit === "kwh"
-        ? total.toFixed(2)
+        ? total.toFixed(3)
         : convertToSoles(total).toFixed(2);
-    } else {
+    } else if (viewMode === "monthly") {
       const total = monthlyData.reduce((sum, d) => sum + d.consumption, 0);
       return unit === "kwh"
-        ? total.toFixed(2)
+        ? total.toFixed(3)
+        : convertToSoles(total).toFixed(2);
+    } else {
+      const total = minuteData.reduce((sum, d) => sum + d.consumption, 0);
+      return unit === "kwh"
+        ? total.toFixed(4)
         : convertToSoles(total).toFixed(2);
     }
   };
@@ -198,6 +262,12 @@ export default function ConsumptionView() {
             onClick={() => setViewMode("daily")}
           >
             Diario
+          </button>
+          <button
+            className={`view-button ${viewMode === "minute" ? "active" : ""}`}
+            onClick={() => setViewMode("minute")}
+          >
+            Minuto
           </button>
           <button
             className={`view-button ${viewMode === "monthly" ? "active" : ""}`}
@@ -223,26 +293,54 @@ export default function ConsumptionView() {
         </div>
       </div>
 
-      {/* Selector de fecha */}
-      <div className="date-selector">
-        <input
-          type={viewMode === "daily" ? "date" : "month"}
-          value={
-            viewMode === "daily"
-              ? format(selectedDate, "yyyy-MM-dd")
-              : format(selectedDate, "yyyy-MM")
-          }
-          onChange={handleDateChange}
-          className="date-input"
-        />
+      {/* Métricas en vivo */}
+      <div className="summary-card metrics-grid">
+        <div>
+          <div className="summary-label">Potencia</div>
+          <div className="summary-value">{(latest.power ?? 0).toFixed(1)} W</div>
+        </div>
+        <div>
+          <div className="summary-label">Voltaje</div>
+          <div className="summary-value">{(latest.voltage ?? 0).toFixed(1)} V</div>
+        </div>
+        <div>
+          <div className="summary-label">Corriente</div>
+          <div className="summary-value">{(latest.current ?? 0).toFixed(2)} A</div>
+        </div>
+        <div>
+          <div className="summary-label">Sesión</div>
+          <div className="summary-value">{(latest.session ?? 0).toFixed(3)} kWh</div>
+        </div>
+        <div>
+          <div className="summary-label">Relé</div>
+          <div className="summary-value">{latest.relay ? "ON" : "OFF"}</div>
+        </div>
       </div>
+
+      {/* Selector de fecha (no aplica en vista por minuto) */}
+      {viewMode !== "minute" && (
+        <div className="date-selector">
+          <input
+            type={viewMode === "daily" ? "date" : "month"}
+            value={
+              viewMode === "daily"
+                ? format(selectedDate, "yyyy-MM-dd")
+                : format(selectedDate, "yyyy-MM")
+            }
+            onChange={handleDateChange}
+            className="date-input"
+          />
+        </div>
+      )}
 
       {/* Tarjeta de resumen */}
       <div className="summary-card">
         <div className="summary-label">
           {viewMode === "daily"
             ? "Consumo Total del Día"
-            : "Consumo Total del Mes"}
+            : viewMode === "monthly"
+            ? "Consumo Total del Mes"
+            : "Consumo Total (últ. 60 min)"}
         </div>
         <div className="summary-value">
           {totalConsumption()} {unit === "kwh" ? "kWh" : "Soles"}

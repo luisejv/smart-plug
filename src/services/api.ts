@@ -1,8 +1,13 @@
-import type { DailyConsumptionData, MonthlyConsumptionData } from "../types";
+import type {
+  DailyConsumptionData,
+  MonthlyConsumptionData,
+  MinuteConsumptionData,
+  LatestMeasurement,
+} from "../types";
 
 // Configuración de la API
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api";
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api";
 
 // Factor de conversión: kWh a Soles (ejemplo: 0.5 soles por kWh)
 const CONVERSION_FACTOR = parseFloat(
@@ -16,22 +21,26 @@ const CONVERSION_FACTOR = parseFloat(
  * @returns Array de consumos por hora
  */
 export async function getDailyConsumption(
-  deviceId: string,
+  _deviceId: string,
   date: Date
 ): Promise<DailyConsumptionData[]> {
   try {
-    // Simulación de datos - Reemplazar con llamada real a la API
+    const queryDate = date.toISOString().split("T")[0]; // YYYY-MM-DD
     const response = await fetch(
-      `${API_BASE_URL}/consumption/daily?deviceId=${deviceId}&date=${date.toISOString()}`
+      `${API_BASE_URL}/consumption/daily?date=${queryDate}`
     );
 
     if (!response.ok) {
-      // Si la API no está disponible, retornar datos simulados
       return generateMockDailyData(date);
     }
 
     const data = await response.json();
-    return data as DailyConsumptionData[];
+    // Adaptar timestamps a Date
+    return (data as any[]).map((d) => ({
+      hour: Number(d.hour),
+      consumption: Number(d.consumption),
+      timestamp: new Date(d.timestamp),
+    }));
   } catch (error) {
     console.warn("API no disponible, usando datos simulados:", error);
     return generateMockDailyData(date);
@@ -45,12 +54,12 @@ export async function getDailyConsumption(
  * @returns Array de consumos por día
  */
 export async function getMonthlyConsumption(
-  deviceId: string,
+  _deviceId: string,
   date: Date
 ): Promise<MonthlyConsumptionData[]> {
   try {
     const response = await fetch(
-      `${API_BASE_URL}/consumption/monthly?deviceId=${deviceId}&month=${
+      `${API_BASE_URL}/consumption/monthly?month=${
         date.getMonth() + 1
       }&year=${date.getFullYear()}`
     );
@@ -60,10 +69,62 @@ export async function getMonthlyConsumption(
     }
 
     const data = await response.json();
-    return data as MonthlyConsumptionData[];
+    return (data as any[]).map((d) => ({
+      day: Number(d.day),
+      consumption: Number(d.consumption),
+      timestamp: new Date(d.timestamp),
+    }));
   } catch (error) {
     console.warn("API no disponible, usando datos simulados:", error);
     return generateMockMonthlyData(date);
+  }
+}
+
+/**
+ * Obtiene consumo agregado por minuto para los últimos N minutos
+ */
+export async function getMinuteConsumption(
+  minutes: number = 60
+): Promise<MinuteConsumptionData[]> {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/consumption/minute?minutes=${minutes}`
+    );
+    if (!response.ok) {
+      // Fallback: genera datos simulados por minuto
+      const now = new Date();
+      const start = new Date(now.getTime() - minutes * 60 * 1000);
+      const arr: MinuteConsumptionData[] = [];
+      let cursor = new Date(start);
+      while (cursor <= now) {
+        arr.push({
+          timestamp: new Date(cursor),
+          consumption: Math.random() * 0.01, // 0–10 Wh por minuto simulado
+        });
+        cursor = new Date(cursor.getTime() + 60 * 1000);
+      }
+      return arr;
+    }
+    const data = await response.json();
+    return (data as any[]).map((d) => ({
+      timestamp: new Date(d.timestamp),
+      consumption: Number(d.consumption),
+    }));
+  } catch (error) {
+    console.warn("API no disponible, usando datos simulados:", error);
+    const now = new Date();
+    const minutes = 60;
+    const start = new Date(now.getTime() - minutes * 60 * 1000);
+    const arr: MinuteConsumptionData[] = [];
+    let cursor = new Date(start);
+    while (cursor <= now) {
+      arr.push({
+        timestamp: new Date(cursor),
+        consumption: Math.random() * 0.01,
+      });
+      cursor = new Date(cursor.getTime() + 60 * 1000);
+    }
+    return arr;
   }
 }
 
@@ -120,4 +181,31 @@ export function getConversionFactor(): number {
  */
 export function convertToSoles(kwh: number): number {
   return kwh * CONVERSION_FACTOR;
+}
+
+/**
+ * Última medición enriquecida (potencia, voltaje, corriente, energía de sesión)
+ */
+export async function getLatest(): Promise<LatestMeasurement | null> {
+  try {
+    const resp = await fetch(`${API_BASE_URL}/latest`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return {
+      ...data,
+      timestamp: data.timestamp ? new Date(data.timestamp) : new Date(),
+      voltage: Number(data.voltage ?? 0),
+      current: Number(data.current ?? 0),
+      power: Number(data.power ?? 0),
+      energy: Number(data.energy ?? 0),
+      session_energy_kwh: Number(data.session_energy_kwh ?? data.energy ?? 0),
+      relay: data.relay ?? 0,
+      relay_bool:
+        typeof data.relay_bool !== "undefined"
+          ? !!data.relay_bool
+          : !!data.relay,
+    } as LatestMeasurement;
+  } catch {
+    return null;
+  }
 }

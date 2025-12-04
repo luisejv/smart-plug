@@ -74,6 +74,12 @@
   text-align: center;
 }
 
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
+  gap: 12px;
+}
+
 .summary-label {
   font-size: 0.875rem;
   color: rgba(255, 255, 255, 0.8);
@@ -117,6 +123,11 @@
     justify-content: space-between;
   }
 
+  .metrics-grid {
+    grid-template-columns: repeat(2, minmax(100px, 1fr));
+    gap: 8px;
+  }
+
   .summary-value {
     font-size: 1.5rem;
   }
@@ -124,5 +135,17 @@
   .chart-container {
     height: 300px;
     padding: 1rem;
+  }
+}
+
+@media (max-width: 1024px) {
+  .metrics-grid {
+    grid-template-columns: repeat(3, minmax(100px, 1fr));
+  }
+}
+
+@media (max-width: 400px) {
+  .metrics-grid {
+    grid-template-columns: 1fr;
   }
 }

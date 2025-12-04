@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import mqttService from "../services/mqtt";
-import type { LastCommand } from "../types";
+import type { LastCommand, ScheduleAction } from "../types";
 import "./MQTTControl.css";
 
 type CommandType = "turnOn" | "turnOff" | "timer" | "schedule";
@@ -8,11 +8,14 @@ type CommandType = "turnOn" | "turnOff" | "timer" | "schedule";
 export default function MQTTControl() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [connecting, setConnecting] = useState<boolean>(false);
-  const [timerMinutes, setTimerMinutes] = useState<number>(30);
+  const [timerSeconds, setTimerSeconds] = useState<number>(30);
   const [scheduleDate, setScheduleDate] = useState<string>("");
   const [scheduleTime, setScheduleTime] = useState<string>("");
+  const [scheduleAction, setScheduleAction] = useState<ScheduleAction>("off");
   const [lastCommand, setLastCommand] = useState<LastCommand | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [relayOn, setRelayOn] = useState<boolean | null>(null);
+  const [thresholdCutEnabled, setThresholdCutEnabled] = useState<boolean | null>(null);
 
   useEffect(() => {
     // Intentar conectar al montar el componente
@@ -21,6 +24,27 @@ export default function MQTTControl() {
     return () => {
       // Desconectar al desmontar
       mqttService.disconnect();
+    };
+  }, []);
+
+  // Suscribirse a las mediciones para conocer el estado del relé
+  useEffect(() => {
+    const unsubscribe = mqttService.onMeasurement((m) => {
+      setRelayOn(!!m.relay);
+      if (typeof m.threshold_cut_enabled !== "undefined") {
+        setThresholdCutEnabled(!!m.threshold_cut_enabled);
+      }
+    });
+    // Inicializa con la última medición si ya existe
+    const last = mqttService.getLastMeasurement?.();
+    if (last) {
+      setRelayOn(!!last.relay);
+      if (typeof last.threshold_cut_enabled !== "undefined") {
+        setThresholdCutEnabled(!!last.threshold_cut_enabled);
+      }
+    }
+    return () => {
+      unsubscribe();
     };
   }, []);
 
@@ -60,11 +84,11 @@ export default function MQTTControl() {
           await mqttService.turnOff();
           break;
         case "timer":
-          if (timerMinutes <= 0) {
+          if (timerSeconds <= 0) {
             setError("El tiempo del timer debe ser mayor a 0");
             return;
           }
-          await mqttService.setTimer(timerMinutes);
+          await mqttService.setTimer(timerSeconds);
           break;
         case "schedule":
           if (!scheduleDate || !scheduleTime) {
@@ -76,7 +100,7 @@ export default function MQTTControl() {
             setError("La fecha y hora programada debe ser futura");
             return;
           }
-          await mqttService.setSchedule(scheduledDateTime);
+          await mqttService.setSchedule(scheduledDateTime, scheduleAction);
           break;
         default:
           throw new Error("Comando no válido");
@@ -125,6 +149,52 @@ export default function MQTTControl() {
         )}
       </div>
 
+      {/* Protección de corte por threshold */}
+      <div className="control-section">
+        <h2 className="section-title">Protección por Threshold</h2>
+        <div
+          className={`status-indicator ${
+            thresholdCutEnabled ? "connected" : "disconnected"
+          }`}
+        >
+          <span className="status-dot"></span>
+          <span className="status-text">
+            {thresholdCutEnabled === null
+              ? "Sin datos"
+              : thresholdCutEnabled
+              ? "Corte por threshold: Activado"
+              : "Corte por threshold: Desactivado"}
+          </span>
+        </div>
+        <div className="control-buttons" style={{ marginTop: "0.75rem" }}>
+          <button
+            className="control-button primary"
+            onClick={() => mqttService.setThresholdCutEnabled(true)}
+            disabled={!isConnected}
+          >
+            Activar corte por threshold
+          </button>
+          <button
+            className="control-button secondary"
+            onClick={() => mqttService.setThresholdCutEnabled(false)}
+            disabled={!isConnected}
+          >
+            Desactivar corte por threshold
+          </button>
+        </div>
+      </div>
+
+      {/* Estado del Relé */}
+      <div className="control-section">
+        <h2 className="section-title">Estado del Relé</h2>
+        <div className={`status-indicator ${relayOn ? "connected" : "disconnected"}`}>
+          <span className="status-dot"></span>
+          <span className="status-text">
+            {relayOn === null ? "Sin datos" : relayOn ? "Encendido (conduciendo)" : "Apagado (no conduce)"}
+          </span>
+        </div>
+      </div>
+
       {error && <div className="error-message">{error}</div>}
 
       {lastCommand && (
@@ -133,9 +203,11 @@ export default function MQTTControl() {
           <div className="last-command-value">
             {lastCommand.type === "turnOn" && "Encender"}
             {lastCommand.type === "turnOff" && "Apagar"}
-            {lastCommand.type === "timer" && `Timer: ${timerMinutes} minutos`}
+            {lastCommand.type === "timer" && `Timer: ${timerSeconds} segundos`}
             {lastCommand.type === "schedule" &&
-              `Programado: ${scheduleDate} ${scheduleTime}`}
+              `Programado: ${scheduleDate} ${scheduleTime} → ${
+                scheduleAction === "on" ? "Encender" : "Apagar"
+              }`}
           </div>
           <div className="last-command-time">
             {lastCommand.timestamp.toLocaleTimeString()}
@@ -171,18 +243,18 @@ export default function MQTTControl() {
           <input
             type="number"
             min="1"
-            max="1440"
-            value={timerMinutes}
-            onChange={(e) => setTimerMinutes(parseInt(e.target.value) || 0)}
+            max="86400"
+            value={timerSeconds}
+            onChange={(e) => setTimerSeconds(parseInt(e.target.value) || 0)}
             className="timer-input"
-            placeholder="Minutos"
+            placeholder="Segundos"
           />
-          <span className="timer-label">minutos</span>
+          <span className="timer-label">segundos</span>
         </div>
         <button
           className="control-button primary"
           onClick={() => handleCommand("timer")}
-          disabled={!isConnected || timerMinutes <= 0}
+          disabled={!isConnected || timerSeconds <= 0}
         >
           Activar Timer
         </button>
@@ -210,6 +282,17 @@ export default function MQTTControl() {
               onChange={(e) => setScheduleTime(e.target.value)}
               className="schedule-input"
             />
+          </div>
+          <div className="schedule-input-group">
+            <label className="schedule-label">Acción</label>
+            <select
+              className="schedule-input"
+              value={scheduleAction}
+              onChange={(e) => setScheduleAction((e.target.value as ScheduleAction) || "off")}
+            >
+              <option value="on">Encender</option>
+              <option value="off">Apagar</option>
+            </select>
           </div>
         </div>
         <button

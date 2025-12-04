@@ -5,6 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_CONVERSION_FACTOR: string;
   readonly VITE_MQTT_BROKER_URL: string;
   readonly VITE_MQTT_TOPIC: string;
+  readonly VITE_MQTT_MEASURE_TOPIC: string;
 }
 
 interface ImportMeta {
